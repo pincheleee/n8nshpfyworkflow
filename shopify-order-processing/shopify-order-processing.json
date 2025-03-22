@@ -1,0 +1,355 @@
+{
+  "name": "Shopify Order Processing",
+  "nodes": [
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyX",
+              "value": 5
+            }
+          ]
+        },
+        "options": {
+          "limit": 20
+        }
+      },
+      "name": "Shopify Trigger",
+      "type": "n8n-nodes-base.shopifyTrigger",
+      "typeVersion": 1,
+      "position": [250, 300],
+      "webhookId": "ck-{{$env.SHOPIFY_WEBHOOK_ID}}",
+      "credentials": {
+        "shopifyApi": {
+          "id": "1",
+          "name": "Shopify account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.financial_status }}",
+              "operation": "equal",
+              "value2": "paid"
+            }
+          ]
+        }
+      },
+      "name": "Is Order Paid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [450, 300]
+    },
+    {
+      "parameters": {
+        "fields": {
+          "values": [
+            {
+              "name": "orderNumber",
+              "value": "={{ $json.order_number }}"
+            },
+            {
+              "name": "customerEmail",
+              "value": "={{ $json.email }}"
+            },
+            {
+              "name": "customerName",
+              "value": "={{ $json.customer.first_name + ' ' + $json.customer.last_name }}"
+            },
+            {
+              "name": "orderDate",
+              "value": "={{ $json.created_at }}"
+            },
+            {
+              "name": "orderTotal",
+              "value": "={{ $json.total_price + ' ' + $json.currency }}"
+            },
+            {
+              "name": "shippingAddress",
+              "value": "={{ $json.shipping_address }}"
+            },
+            {
+              "name": "lineItems",
+              "value": "={{ $json.line_items }}"
+            }
+          ]
+        },
+        "include": {
+          "include": "all"
+        }
+      },
+      "name": "Prepare Order Data",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 1,
+      "position": [650, 200]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "={{ $env.GOOGLE_SHEET_ID }}",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Orders",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData"
+        },
+        "options": {}
+      },
+      "name": "Save to Orders Sheet",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 2,
+      "position": [850, 200],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "2",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.EMAIL_API_URL }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "to",
+              "value": "={{ $node[\"Prepare Order Data\"].json.customerEmail }}"
+            },
+            {
+              "name": "subject",
+              "value": "Order Confirmation #{{ $node[\"Prepare Order Data\"].json.orderNumber }}"
+            },
+            {
+              "name": "templateId",
+              "value": "={{ $env.ORDER_CONFIRMATION_TEMPLATE_ID }}"
+            },
+            {
+              "name": "variables",
+              "value": "={\n  \"customerName\": \"{{ $node[\"Prepare Order Data\"].json.customerName }}\",\n  \"orderNumber\": \"{{ $node[\"Prepare Order Data\"].json.orderNumber }}\",\n  \"orderDate\": \"{{ $node[\"Prepare Order Data\"].json.orderDate }}\",\n  \"orderTotal\": \"{{ $node[\"Prepare Order Data\"].json.orderTotal }}\",\n  \"items\": {{ $node[\"Prepare Order Data\"].json.lineItems }}\n}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "name": "Send Order Confirmation Email",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 2,
+      "position": [1050, 200],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "3",
+          "name": "Email API Credentials"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "keepOnlySet": true,
+        "values": {
+          "string": [
+            {
+              "name": "errorSource",
+              "value": "Shopify Order Processing Workflow"
+            },
+            {
+              "name": "errorMessage",
+              "value": "=Error processing order {{ $json.order_number }}: {{ $error.message }}"
+            },
+            {
+              "name": "timestamp",
+              "value": "={{ $now.toISOString() }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "name": "Format Error",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 2,
+      "position": [650, 500]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.ERROR_WEBHOOK_URL }}",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "content",
+              "value": "=:warning: **Workflow Error**\nSource: {{ $node[\"Format Error\"].json.errorSource }}\nMessage: {{ $node[\"Format Error\"].json.errorMessage }}\nTime: {{ $node[\"Format Error\"].json.timestamp }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "name": "Send Error Notification",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 2,
+      "position": [850, 500]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Initialize shipping data for tracking workflow\nconst items = $input.json.line_items || [];\nconst itemNames = items.map(item => item.name).join(\", \");\n\nconst data = {\n  orderId: $input.json.id,\n  orderNumber: $input.json.order_number,\n  customerEmail: $input.json.email,\n  customerName: $input.json.customer ? \n    `${$input.json.customer.first_name} ${$input.json.customer.last_name}` : \n    'Customer',\n  items: itemNames,\n  shippingAddress: $input.json.shipping_address ? {\n    address1: $input.json.shipping_address.address1,\n    address2: $input.json.shipping_address.address2,\n    city: $input.json.shipping_address.city,\n    province: $input.json.shipping_address.province,\n    zip: $input.json.shipping_address.zip,\n    country: $input.json.shipping_address.country\n  } : {},\n  orderStatus: 'processing',\n  fulfillmentStatus: $input.json.fulfillment_status || 'unfulfilled',\n  createdAt: $input.json.created_at\n};\n\nreturn {json: data};"
+      },
+      "name": "Prepare Shipment Data",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [650, 300]
+    },
+    {
+      "parameters": {
+        "triggerTimes": {
+          "item": [
+            {
+              "mode": "everyX",
+              "value": 1
+            }
+          ]
+        }
+      },
+      "name": "Start Shipment Tracking",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [850, 300]
+    }
+  ],
+  "connections": {
+    "Shopify Trigger": {
+      "main": [
+        [
+          {
+            "node": "Is Order Paid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Order Paid?": {
+      "main": [
+        [
+          {
+            "node": "Prepare Order Data",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [],
+        [
+          {
+            "node": "Format Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Order Data": {
+      "main": [
+        [
+          {
+            "node": "Save to Orders Sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save to Orders Sheet": {
+      "main": [
+        [
+          {
+            "node": "Send Order Confirmation Email",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Prepare Shipment Data",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Format Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Order Confirmation Email": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Format Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Error": {
+      "main": [
+        [
+          {
+            "node": "Send Error Notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Shipment Data": {
+      "main": [
+        [
+          {
+            "node": "Start Shipment Tracking",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "Error Handler"
+  },
+  "staticData": null,
+  "pinData": {},
+  "versionId": "c9a5b54e-a3c2-4f55-8b15-41240bdc2d20",
+  "id": "shopify-order-processing",
+  "meta": {
+    "instanceId": "a1b2c3d4e5f6"
+  },
+  "tags": [
+    {
+      "id": "1",
+      "name": "shopify"
+    },
+    {
+      "id": "2",
+      "name": "order"
+    }
+  ]
+}
